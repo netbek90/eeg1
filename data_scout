@@ -1,0 +1,241 @@
+import numpy as np
+import pandas as pd
+import os
+import random
+from tqdm import tqdm
+import matplotlib
+import seaborn as sns
+import matplotlib.pyplot as plt
+import plotly
+import plotly.graph_objs as go
+from plotly.offline import init_notebook_mode, iplot
+from plotly import tools
+from scipy.stats import mannwhitneyu
+from nbformat import *
+
+
+
+#notebook_path = os.getcwd()
+#print(notebook_path)
+
+
+
+init_notebook_mode(connected=True) ## plotly init
+seed = 123
+random.seed = seed
+
+
+data_train_path='C:/Users/Netbek/eeg1/df/SMNI_CMI_TRAIN/'
+print('Total amount of files in SMNI_CMI_TRAIN directory: ' + str(len(os.listdir(data_train_path))))
+
+
+filenames_list = os.listdir(data_train_path) ##
+EEG_data = pd.DataFrame({})  ## create an empty df that will hold data from each file
+
+for file_name in tqdm(filenames_list):
+    temp_df = pd.read_csv(data_train_path + file_name)  ## read from the file to df
+    EEG_data = pd.concat([EEG_data, temp_df], ignore_index=True)  ## add the file data to the main df
+
+EEG_data = EEG_data.drop(['Unnamed: 0'], axis=1)  ## remove the unused column
+EEG_data.loc[EEG_data[
+                 'matching condition'] == 'S2 nomatch,', 'matching condition'] = 'S2 nomatch'  ## remove comma sign from stimulus name
+
+
+#EEG_data.head()
+
+
+EEG_data.loc[EEG_data['sensor position'] == 'AF1', 'sensor position'] = 'AF3'
+EEG_data.loc[EEG_data['sensor position'] == 'AF2', 'sensor position'] = 'AF4'
+EEG_data.loc[EEG_data['sensor position'] == 'PO1', 'sensor position'] = 'PO3'
+EEG_data.loc[EEG_data['sensor position'] == 'PO2', 'sensor position'] = 'PO4'
+## remove rows with undefined positions
+EEG_data = EEG_data[(EEG_data['sensor position'] != 'X') & (EEG_data['sensor position'] != 'Y') & (EEG_data['sensor position'] != 'nd')]
+
+def sample_data(stimulus, random_id=random.randint(0, 7)):
+    """Function merged data frame - one data frame for randomly selected subject from control group and
+    one data frame for randomly selected subject from alcoholic group"""
+    ## random choose the name_id of subject from alcoholic/control group
+    alcoholic_id = EEG_data['name'][(EEG_data['subject identifier'] == 'a') &
+                                    (EEG_data['matching condition'] == stimulus)].unique()[random_id]
+    control_id = EEG_data['name'][(EEG_data['subject identifier'] == 'c') &
+                                  (EEG_data['matching condition'] == stimulus)].unique()[random_id]
+
+    ## get min trial numbers for each group
+    alcoholic_trial_number = EEG_data['trial number'][
+        (EEG_data['name'] == alcoholic_id) & (EEG_data['matching condition'] == stimulus)].min()
+    control_trial_number = EEG_data['trial number'][
+        (EEG_data['name'] == control_id) & (EEG_data['matching condition'] == stimulus)].min()
+
+    ## filter the EEG DF
+    alcoholic_df = EEG_data[(EEG_data['name'] == alcoholic_id) & (EEG_data['trial number'] == alcoholic_trial_number)]
+    control_df = EEG_data[(EEG_data['name'] == control_id) & (EEG_data['trial number'] == control_trial_number)]
+
+    return pd.concat([alcoholic_df, control_df])
+
+
+sensor_positions = \
+EEG_data[['sensor position', 'channel']].drop_duplicates().reset_index(drop=True).drop(['channel'], axis=1).reset_index(
+    drop=False).rename(columns={'index': 'channel'})['sensor position']
+channels = \
+EEG_data[['sensor position', 'channel']].drop_duplicates().reset_index(drop=True).drop(['channel'], axis=1).reset_index(
+    drop=False).rename(columns={'index': 'channel'})['channel']
+
+
+def plot_3dSurface_and_heatmap(stimulus, group, df):
+    if group == 'c':
+        group_name = 'Контроль'
+    else:
+        group_name = 'Алкоголики'
+
+    temp_df = pd.pivot_table(df[['channel', 'sample num', 'sensor value']][
+                                 (df['subject identifier'] == group) & (df['matching condition'] == stimulus)],
+                             index='channel', columns='sample num', values='sensor value').values.tolist()
+    data = [go.Surface(z=temp_df, colorscale='Bluered')]
+
+    layout = go.Layout(
+        title='<br>Трехмерная карта/ тепловая карта значений сенсоров ' +'для группы ' + group_name,
+        width=800,
+        height=900,
+        autosize=False,
+        margin=dict(t=0, b=0, l=0, r=0),
+        scene=dict(
+            xaxis=dict(
+                title='Время',
+                gridcolor='rgb(255, 255, 255)',
+                #             erolinecolor='rgb(255, 255, 255)',
+                showbackground=True,
+                backgroundcolor='rgb(230, 230,230)'
+            ),
+            yaxis=dict(
+                title='Сенсор',
+                tickvals=channels,
+                ticktext=sensor_positions,
+                gridcolor='rgb(255, 255, 255)',
+                zerolinecolor='rgb(255, 255, 255)',
+                showbackground=True,
+                backgroundcolor='rgb(230, 230, 230)'
+            ),
+            zaxis=dict(
+                title='Значение сенсора',
+                gridcolor='rgb(255, 255, 255)',
+                zerolinecolor='rgb(255, 255, 255)',
+                showbackground=True,
+                backgroundcolor='rgb(230, 230,230)'
+            ),
+            aspectratio=dict(x=1, y=1, z=0.5),
+            aspectmode='manual'
+        )
+    )
+
+    updatemenus = list([
+        dict(
+            buttons=list([
+                dict(
+                    args=['type', 'surface'],
+                    label='3D Surface',
+                    method='restyle'
+                ),
+                dict(
+                    args=['type', 'heatmap'],
+                    label='Heatmap',
+                    method='restyle'
+                )
+            ]),
+            direction='left',
+            pad={'r': 10, 't': 10},
+            showactive=True,
+            type='buttons',
+            x=0.1,
+            xanchor='left',
+            y=1.1,
+            yanchor='top'
+        ),
+    ])
+
+    annotations = list([
+        dict(text='Trace type:', x=0, y=1.085, yref='paper', align='left', showarrow=False)
+    ])
+    layout['updatemenus'] = updatemenus
+    layout['annotations'] = annotations
+
+    fig = dict(data=data, layout=layout)
+
+    iplot(fig, filename='plot_save.png')
+    plotly.offline.iplot(fig)
+
+
+stimulus = 'S1 obj'
+S1_sample_df = sample_data(stimulus=stimulus, random_id=1)
+#a group
+plot_3dSurface_and_heatmap(stimulus=stimulus, group='a', df=S1_sample_df)
+#c group
+plot_3dSurface_and_heatmap(stimulus=stimulus, group='c', df=S1_sample_df)
+
+## create the list of possible channel pairs
+stimulus = 'S2 match'
+S2_sample_df = sample_data(stimulus=stimulus, random_id=1)
+sample_corr_df = pd.pivot_table(S2_sample_df[S2_sample_df['subject identifier'] == 'a'], values='sensor value', index='sample num', columns='sensor position').corr()
+
+list_of_pairs = []
+j = 0
+for column in sample_corr_df.columns:
+    j += 1
+    for i in range(j, len(sample_corr_df)):
+        if column != sample_corr_df.index[i]:
+            temp_pair = [column + '-' + sample_corr_df.index[i]]
+            list_of_pairs.append(temp_pair)
+
+def get_correlated_pairs_sample(threshold, correlation_df, group):
+    ## create dictionary wheke keys are the pairs and values are the amount of high correlation pair
+    corr_pairs_dict = {}
+    for i in range(len(list_of_pairs)):
+        temp_corr_pair = dict(zip(list_of_pairs[i], [0]))
+        corr_pairs_dict.update(temp_corr_pair)
+
+    j = 0
+    for column in correlation_df.columns:
+        j += 1
+        for i in range(j, len(correlation_df)):
+            if ((correlation_df[column][i] >= threshold) & (column != correlation_df.index[i])):
+                corr_pairs_dict[column + '-' + correlation_df.index[i]] += 1
+
+    corr_count = pd.DataFrame(corr_pairs_dict, index=['count']).T.reset_index(drop=False).rename(columns={'index': 'channel_pair'})
+    print('Channel pairs that have correlation value >= ' + str(threshold) + ' (' + group + ' group):')
+    print(corr_count['channel_pair'][corr_count['count'] > 0].tolist())
+
+def plot_sensors_correlation(df, threshold_value):
+    """Funtion plots the the correlation plots between sensor positions for each group"""
+    correlations_alcoholic = pd.pivot_table(df[df['subject identifier'] == 'a'], 
+                                          values='sensor value', index='sample num', columns='sensor position').corr()
+
+    correlations_control = pd.pivot_table(df[df['subject identifier'] == 'c'], 
+                                          values='sensor value', index='sample num', columns='sensor position').corr()
+
+    fig = plt.figure(figsize=(17,10))
+    ax = fig.add_subplot(121)
+    ax.set_title('Группа с алкоголизмом', fontsize=14)
+    mask = np.zeros_like(correlations_alcoholic, dtype=bool)
+    mask[np.triu_indices_from(mask)] = True
+    cmap = sns.diverging_palette(220, 10, as_cmap=True)
+    sns.heatmap(correlations_alcoholic, mask=mask, cmap=cmap, vmin=-1, vmax=1, center=0,
+                square=True, linewidths=.5, cbar_kws={"shrink": .5})
+
+    ax = fig.add_subplot(122)
+    ax.set_title('Контрольная группа', fontsize=14)
+    mask = np.zeros_like(correlations_control, dtype=bool)
+    mask[np.triu_indices_from(mask)] = True
+    cmap = sns.diverging_palette(220, 10, as_cmap=True)
+    sns.heatmap(correlations_control, mask=mask, cmap=cmap, vmin=-1, vmax=1, center=0,
+                square=True, linewidths=.5, cbar_kws={"shrink": .5})
+
+    plt.suptitle('Корреляция между различными сенсорами ', fontsize=16)
+    plt.show()
+    
+    get_correlated_pairs_sample(threshold=threshold_value, correlation_df=correlations_alcoholic, group='Alcoholic')
+    print('\n')
+    get_correlated_pairs_sample(threshold=threshold_value, correlation_df=correlations_control, group='Control')
+
+plot_sensors_correlation(df=S1_sample_df, threshold_value=.95)
+
+
+  
