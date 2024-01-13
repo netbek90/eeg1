@@ -1,0 +1,353 @@
+import numpy as np
+import pandas as pd
+import os
+import random
+from tqdm import tqdm
+import matplotlib
+import seaborn as sns
+import matplotlib.pyplot as plt
+import plotly
+import plotly.graph_objs as go
+from plotly.offline import init_notebook_mode, iplot
+from plotly import tools
+from scipy.stats import mannwhitneyu
+from nbformat import *
+import biosppy.signals
+import random
+from scipy.spatial.distance import pdist
+from scipy.integrate import simps
+
+notebook_path = os.getcwd()
+print(notebook_path)
+init_notebook_mode(connected=True)  ## plotly init
+seed = 123
+random.seed = seed
+
+data_train_path = 'C:/Users/Netbek/eeg1/df/SMNI_CMI_TRAIN/'
+
+print('Total amount of files in SMNI_CMI_TRAIN directory: ' + str(len(os.listdir(data_train_path))))
+
+filenames_list = os.listdir(data_train_path)  ##
+
+EEG_data = pd.DataFrame({})  ## create an empty df that will hold data from each file
+
+for file_name in tqdm(filenames_list):
+    temp_df = pd.read_csv(data_train_path + file_name)  ## read from the file to df
+    EEG_data = pd.concat([EEG_data, temp_df], ignore_index=True)  ## add the file data to the main df
+
+#####perm
+
+
+EEG_data = EEG_data.drop(['Unnamed: 0'], axis=1)  ## remove the unused column
+EEG_data.loc[EEG_data[
+                 'matching condition'] == 'S2 nomatch,', 'matching condition'] = 'S2 nomatch'  ## remove comma sign from stimulus name
+
+EEG_data.head()
+
+EEG_data.loc[EEG_data['sensor position'] == 'AF1', 'sensor position'] = 'AF3'
+EEG_data.loc[EEG_data['sensor position'] == 'AF2', 'sensor position'] = 'AF4'
+EEG_data.loc[EEG_data['sensor position'] == 'PO1', 'sensor position'] = 'PO3'
+EEG_data.loc[EEG_data['sensor position'] == 'PO2', 'sensor position'] = 'PO4'
+## remove rows with undefined positions
+EEG_data = EEG_data[
+    (EEG_data['sensor position'] != 'X') & (EEG_data['sensor position'] != 'Y') & (EEG_data['sensor position'] != 'nd')]
+
+trial_list = EEG_data['trial number'].unique()
+patient_list = EEG_data['name'].unique()
+
+trial_patient_list = [(trial, patient) for trial in EEG_data['trial number'].unique() for patient in
+                      EEG_data['name'].unique()]
+# df_list = [EEG_data[(EEG_data['trial number'] == trial) & (EEG_data['name'] == patient)] for trial, patient in
+#           trial_patient_list]
+df_list = [df for df in
+           (EEG_data[(EEG_data['trial number'] == trial) & (EEG_data['name'] == patient)] for trial, patient in
+            trial_patient_list) if not df.empty]
+
+
+#######funcs
+
+def correlation_integral_two_series(data1, data2, embedding_dim, radius):
+    if len(data1) != len(data2):
+        print(f"Error: data1 and data2 have different lengths ({len(data1)} vs {len(data2)})")
+        return np.nan
+
+    N = len(data1) - embedding_dim + 1
+    delay_vectors1 = np.array([data1[i:i + embedding_dim] for i in range(N)])
+    delay_vectors2 = np.array([data2[i:i + embedding_dim] for i in range(N)])
+
+    correlation_count = 0
+    for j in range(N):
+        yj = delay_vectors1[j]
+        distances = np.linalg.norm(delay_vectors2 - yj, axis=1)
+        correlation_count += np.sum(distances < radius)
+
+    for j in range(N):
+        yj = delay_vectors2[j]
+        distances = np.linalg.norm(delay_vectors1 - yj, axis=1)
+        correlation_count += np.sum(distances < radius)
+
+    return correlation_count / ((N + N) * (N + N - 1))
+
+def correlation_dimension_two_series(data1, data2, max_embedding_dim, radius_values):
+    data1_filled = np.nan_to_num(data1)
+    data2_filled = np.nan_to_num(data2)
+    correlation_dimensions = []
+    for d in range(2, max_embedding_dim + 1):
+        correlation_integrals = [correlation_integral_two_series(data1_filled, data2_filled, d, r) for r in radius_values]
+        log_correlation_integrals = np.log(correlation_integrals)
+        log_radius = np.log(radius_values)
+
+        slope = (log_correlation_integrals[-1] - log_correlation_integrals[0]) / (log_radius[-1] - log_radius[0])
+        correlation_dimensions.append(slope)
+
+    return correlation_dimensions
+
+######add func
+def mutual_correlation_dimension(x, y, m, tau, r_values):
+    """
+    Calculates the mutual correlation dimension between two time series using the Procaccia algorithm.
+
+    Parameters:
+    x, y (array-like): The two time series.
+    m (int): The embedding dimension.
+    tau (int): The time delay.
+    r_values (array-like): The radius values for calculating the correlation sum.
+
+    Returns:
+    D2 (float): The mutual correlation dimension.
+    """
+
+    # Create the delay vectors for each time series
+    x_delay = create_delay_vectors(x, m, tau)
+    y_delay = create_delay_vectors(y, m, tau)
+
+    # Calculate the distance matrices for each time series
+    x_dist_matrix = pdist(x_delay, metric='euclidean')
+    y_dist_matrix = pdist(y_delay, metric='euclidean')
+
+    # Calculate the correlation sum for each time series
+    x_corr_sum = correlation_sum(x_dist_matrix, r_values)
+    y_corr_sum = correlation_sum(y_dist_matrix, r_values)
+
+    # Calculate the mutual correlation sum
+    mutual_corr_sum = np.zeros(len(r_values))
+    for i, r in enumerate(r_values):
+        xy_mask = np.outer(x_dist_matrix < r, y_dist_matrix < r)
+        mutual_corr_sum[i] = np.sum(xy_mask) / (len(x_dist_matrix)**2)
+
+    # Calculate the mutual correlation dimension
+    D2 = mutual_correlation_dimension_calc(mutual_corr_sum, x_corr_sum, y_corr_sum, r_values)
+
+    return D2
+
+def create_delay_vectors(x, m, tau):
+    """
+    Creates the delay vectors for a time series.
+
+    Parameters:
+    x (array-like): The time series.
+    m (int): The embedding dimension.
+    tau (int): The time delay.
+
+    Returns:
+    delay_vectors (array-like): The delay vectors.
+    """
+
+    N = len(x)
+    delay_vectors = np.zeros((N - (m-1)*tau, m))
+    for i in range(N - (m-1)*tau):
+        delay_vectors[i] = x[i:i+m*tau:tau]
+
+    return delay_vectors
+
+def correlation_sum(dist_matrix, r_values):
+    """
+    Calculates the correlation sum for a distance matrix.
+
+    Parameters:
+    dist_matrix (array-like): The distance matrix.
+    r_values (array-like): The radius values for calculating the correlation sum.
+
+    Returns:
+    C (array-like): The correlation sum.
+    """
+
+    N = len(dist_matrix)
+    C = np.zeros(len(r_values))
+    for i, r in enumerate(r_values):
+        C[i] = np.sum(np.where(dist_matrix < r, 1, 0)) / (N**2)
+
+    return C
+
+def mutual_correlation_dimension_calc(mutual_corr_sum, x_corr_sum, y_corr_sum, r_values):
+    """
+    Calculates the mutual correlation dimension from the mutual correlation sum and the individual correlation sums.
+
+    Parameters:
+    mutual_corr_sum (array-like): The mutual correlation sum.
+    x_corr_sum (array-like): The correlation sum for time series x.
+    y_corr_sum (array-like): The correlation sum for time series y.
+    r_values (array-like): The radius values for calculating the correlation sum.
+
+    Returns:
+    D2 (float): The mutual correlation dimension.
+    """
+
+    # Calculate the logarithms of the correlation sums
+    log_mutual_corr_sum = np.log(mutual_corr_sum)
+    log_x_corr_sum = np.log(x_corr_sum)
+    log_y_corr_sum = np.log(y_corr_sum)
+
+    # Calculate the slopes of the log-log plots
+    mutual_slope, _ = np.polyfit(np.log(r_values), log_mutual_corr_sum, 1, full=True)
+    x_slope, _ = np.polyfit(np.log(r_values), log_x_corr_sum, 1, full=True)
+    y_slope, _ = np.polyfit(np.log(r_values), log_y_corr_sum, 1, full=True)
+
+    # Calculate the mutual correlation dimension
+    D2 = mutual_slope - (x_slope + y_slope) / 2
+
+    return D2
+
+#####
+# for speed up calculating
+sub_df_list = df_list[:100]
+
+a_group = [df for df in sub_df_list if df['subject identifier'].eq('a').any()]
+c_group = [df for df in sub_df_list if df['subject identifier'].eq('c').any()]
+# trunk
+if len(a_group) >= len(c_group):
+    a_group = a_group[:len(c_group)]
+else:
+    c_group = c_group[:len(a_group)]
+
+### more trunks
+a_group = a_group[:1]
+c_group = c_group[:1]
+
+a_sublist_dict = {str(i): [df[df['sensor position'] == pos] for pos in df['sensor position'].unique()] for i, df in
+                  enumerate(a_group)}
+c_sublist_dict = {str(i): [df[df['sensor position'] == pos] for pos in df['sensor position'].unique()] for i, df in
+                  enumerate(c_group)}
+
+
+
+
+#######testing
+ttt1=a_sublist_dict['0'][0]['sensor value']
+t1_reset = ttt1.reset_index(drop=True)
+
+ttt2=a_sublist_dict['0'][1]['sensor value']
+t2_reset = ttt2.reset_index(drop=True)
+
+
+import scipy.stats as stats
+def correlation_integral_two_series(data1, data2, embedding_dim, radius):
+    N1 = len(data1) - embedding_dim + 1
+    N2 = len(data2) - embedding_dim + 1
+    delay_vectors1 = np.array([data1[i:i + embedding_dim] for i in range(N1)])
+    delay_vectors2 = np.array([data2[i:i + embedding_dim] for i in range(N2)])
+
+    correlation_count = 0
+    for j in range(N1):
+        yj = delay_vectors1[j]
+        distances = np.linalg.norm(delay_vectors2 - yj, axis=1)
+        correlation_count += np.sum(distances < radius)
+
+    for j in range(N2):
+        yj = delay_vectors2[j]
+        distances = np.linalg.norm(delay_vectors1 - yj, axis=1)
+        correlation_count += np.sum(distances < radius)
+
+    return correlation_count / ((N1 + N2) * (N1 + N2 - 1))
+
+def correlation_dimension_two_series(data1, data2, max_embedding_dim, radius_values):
+    correlation_dimensions = []
+    for d in range(1, max_embedding_dim + 1):
+        correlation_integrals = [correlation_integral_two_series(data1, data2, d, r) for r in radius_values]
+        log_correlation_integrals = np.log(correlation_integrals)
+        log_radius = np.log(radius_values)
+
+        slope, intercept, r_value, p_value, std_err = stats.linregress(log_radius, log_correlation_integrals)
+        correlation_dimensions.append(slope)
+
+    return correlation_dimensions
+
+
+max_embedding_dimension = 5
+radius_values = np.logspace(0, 1, 6)
+
+dimensions = correlation_dimension_two_series(t1_reset,t2_reset, max_embedding_dimension, radius_values)
+print(dimensions)
+max_embedding_dimension_lst=[]
+#############
+#testnext
+test_dim=[]
+max_embedding_dimension = 5
+radius_values = np.logspace(0, 1, 6)
+for i in range(len(a_sublist_dict['0'])-1):
+    ttt1=a_sublist_dict['0'][0]['sensor value']
+    t1_reset = ttt1.reset_index(drop=True)
+    ttt2=a_sublist_dict['0'][i+1]['sensor value']
+    t2_reset = ttt2.reset_index(drop=True)
+    dimensions = correlation_dimension_two_series(t1_reset, t2_reset, max_embedding_dimension, radius_values)
+    test_dim.append(dimensions)
+    break
+
+###a_group
+correlation_dimensions = []
+max_embedding_dimension = 5
+radius_values = np.logspace(0, 1, 6)
+for i in a_sublist_dict.keys():
+    for j in range(len(a_sublist_dict[i])):
+        for k in range(j + 1, len(a_sublist_dict[i])):
+            time_series_data1 = a_sublist_dict[i][j]['sensor value'][0:200].reset_index(drop=True)
+            time_series_data2 = a_sublist_dict[i][k]['sensor value'][0:200].reset_index(drop=True)
+
+            # Calculate the correlation dimension between the two time series
+            dimensions = correlation_dimension_two_series(time_series_data1, time_series_data2, max_embedding_dimension,
+                                                          radius_values)
+
+            # Append the correlation dimension to the list
+            correlation_dimensions.append(dimensions)
+# random.choice(test_df.columns)][0:1000]
+
+
+# Iterate through the lists and calculate the mean values
+a_mean_values = [np.nanmean([x[i] for x in correlation_dimensions if len(x) > i and not np.isnan(x[i])]) for i in range(max(map(len, correlation_dimensions)))]
+
+
+
+#####c group
+correlation_dimensions = []
+max_embedding_dimension = 5
+radius_values = np.logspace(0, 1, 6)
+for i in c_sublist_dict.keys():
+    for j in range(len(c_sublist_dict[i])):
+        for k in range(j + 1, len(c_sublist_dict[i])):
+            time_series_data1 = c_sublist_dict[i][j]['sensor value'][0:200].reset_index(drop=True)
+            time_series_data2 = c_sublist_dict[i][k]['sensor value'][0:200].reset_index(drop=True)
+
+            # Calculate the correlation dimension between the two time series
+            dimensions = correlation_dimension_two_series(time_series_data1, time_series_data2, max_embedding_dimension,
+                                                          radius_values)
+
+            # Append the correlation dimension to the list
+            correlation_dimensions.append(dimensions)
+# random.choice(test_df.columns)][0:1000]
+
+
+# Iterate through the lists and calculate the mean values
+c_mean_values = [np.nanmean([x[i] for x in correlation_dimensions if len(x) > i and not np.isnan(x[i])]) for i in range(max(map(len, correlation_dimensions)))]
+
+#a
+plt.plot(np.linspace(1, max_embedding_dimension, max_embedding_dimension), a_mean_values)
+plt.xlabel('Embedding Dimension')
+plt.ylabel('Cross Correlation Dimension')
+plt.title('Cross Correlation Dimension vs. Embedding Dimension')
+plt.show()
+#c
+plt.plot(np.linspace(1, max_embedding_dimension, max_embedding_dimension), c_mean_values)
+plt.xlabel('Embedding Dimension')
+plt.ylabel('Cross Correlation Dimension')
+plt.title('Cross Correlation Dimension vs. Embedding Dimension')
+plt.show()
